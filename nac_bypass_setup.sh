@@ -10,7 +10,8 @@
 # -----
 
 ## Variables
-VERSION="0.6.5-1771668675"
+VERSION="0.6.5-1787207350"
+RANDOMIZE=0
 
 CMD_ARPTABLES=/usr/sbin/arptables
 CMD_EBTABLES=/usr/sbin/ebtables
@@ -25,11 +26,29 @@ INP="\e[1;36m" # cyan
 
 BRINT=br0 # bridge interface
 SWINT=eth0 # network interface plugged into switch
-SWMAC=00:11:22:33:44:55 # initial value, is set during initialisation
 COMPINT=eth1 # network interface plugged into victim machine
 
-BRIP=169.254.66.66 # IP address for the bridge
-BRGW=169.254.66.1 # Gateway IP address for the bridge
+## Set initial SWMAC value, is set during initialisation
+if [ "$RANDOMIZE" -eq 0 ]; then
+  SWMAC=00:11:22:33:44:55
+else
+  SWMAC=$(printf '02:%02x:%02x:%02x:%02x:%02x\n' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))
+fi
+
+## Set IP addresses for bridge
+if [ "$RANDOMIZE" -eq 0 ]; then
+  BRIP=169.254.66.66 # IP address for the bridge
+  BRGW=169.254.66.1 # Gateway IP address for the bridge
+else
+  THIRD_OCTET=$(( (RANDOM % 254) + 1 ))
+  while :; do
+    LAST_OCTED=$(( RANDOM % 256 ))
+    # avoid .0, .1, .255 for the "random" one so it doesn't collide with the first IP or be a broadcast/network addr
+    [[ $LAST_OCTED -ne 0 && $LAST_OCTED -ne 1 && $LAST_OCTED -ne 255 ]] && break
+  done
+  BRIP="169.254.${THIRD_OCTET}.${LAST_OCTED}" # IP address for the bridge
+  BRGW="169.254.${THIRD_OCTET}.1" # Gateway IP address for the bridge
+fi
 
 TEMP_FILE=/tmp/tcpdump.pcap
 OPTION_RESPONDER=0
@@ -230,7 +249,11 @@ InitialSetup() {
     ifconfig $COMPINT 0.0.0.0 up promisc # bring up comp interface
     ifconfig $SWINT 0.0.0.0 up promisc # bring up switch interface
 
-    macchanger -m 00:12:34:56:78:90 $BRINT # Swap MAC of bridge to an initialisation value
+    if [ "$RANDOMIZE" -eq 0 ]; then
+        macchanger -m 00:12:34:56:78:90 $BRINT # Swap MAC of bridge to an initialisation value
+    else
+        macchanger -A $BRINT # Swap MAC of bridge to an initialisation value
+    fi
     macchanger -m $SWMAC $BRINT # Swap MAC of bridge to the switch side MAC
 
     ## Bringing up the Bridge
