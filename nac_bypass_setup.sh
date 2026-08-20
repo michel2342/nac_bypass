@@ -112,6 +112,14 @@ Version() {
     exit 0
 }
 
+## Make sure we're running as root, everything below relies on it
+CheckRoot() {
+    if [ "$EUID" -ne 0 ]; then
+        echo -e "$WARN [ ! ] This script must be run as root.$TXTRST"
+        exit 1
+    fi
+}
+
 ## Check if we got all needed parameters
 CheckParams() {
     while getopts ":1:2:acg:f:s:t:T:hirRS" opts
@@ -227,8 +235,8 @@ InitialSetup() {
     brctl addif $BRINT $SWINT # add switch side to bridge
 
     # Disable STP for the bridge in order to avoid leaking the bridge's MAC
-    sudo ip link set dev br0 type bridge stp_state 0
-    sudo ip link set dev br0 type bridge forward_delay 0
+    ip link set dev br0 type bridge stp_state 0
+    ip link set dev br0 type bridge forward_delay 0
 
     # Forward EAP packets (bit 3 = 8) & LLDP packets (bit 14 = 16384)
     echo 16392 > /sys/class/net/br0/bridge/group_fwd_mask # forward EAP packets
@@ -482,6 +490,7 @@ Reset() {
 
 ## Main
 CheckParams $@
+CheckRoot
 
 if [ "$OPTION_RESET" -eq 1 ]; then
     Reset
