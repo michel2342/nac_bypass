@@ -207,7 +207,12 @@ InitialSetup() {
     brctl addif $BRINT $COMPINT # add computer side to bridge
     brctl addif $BRINT $SWINT # add switch side to bridge
 
-    echo 8 > /sys/class/net/br0/bridge/group_fwd_mask # forward EAP packets
+    # Disable STP for the bridge in order to avoid leaking the bridge's MAC
+    sudo ip link set dev br0 type bridge stp_state 0
+    sudo ip link set dev br0 type bridge forward_delay 0
+
+    # Forward EAP packets (bit 3 = 8) & LLDP packets (bit 14 = 16384)
+    echo 16392 > /sys/class/net/br0/bridge/group_fwd_mask # forward EAP packets
 
     # Ensuring br_netfilter is available for bridge iptables support
     if [ ! -d /proc/sys/net/bridge ]; then
