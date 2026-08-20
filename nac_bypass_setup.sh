@@ -236,6 +236,9 @@ InitialSetup() {
     ## Bringing up the Bridge
     ifconfig $BRINT 0.0.0.0 up promisc
 
+    ## Set default iptables forward policy to ACCEPT to avoid bridge from being non functional 
+    $CMD_IPTABLES -P FORWARD ACCEPT
+
     if [ "$OPTION_AUTONOMOUS" -eq 0 ]; then
         echo
         echo -e "$SUCC [ + ] Bridge up, should be dark.$TXTRST"
