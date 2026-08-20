@@ -43,13 +43,13 @@ if [ "$RANDOMIZE" -eq 0 ]; then
 else
     THIRD_OCTET=$(( (RANDOM % 254) + 1 ))
     while :; do
-        LAST_OCTED=$(( RANDOM % 256 ))
+        LAST_OCTET=$(( RANDOM % 256 ))
         # avoid .0, .1, .255 for the "random" one so it doesn't collide with the first IP or be a broadcast/network addr
-        if [[ $LAST_OCTED -ne 0 && $LAST_OCTED -ne 1 && $LAST_OCTED -ne 255 ]]; then
+        if [[ $LAST_OCTET -ne 0 && $LAST_OCTET -ne 1 && $LAST_OCTET -ne 255 ]]; then
             break
         fi
     done
-    BRIP="169.254.${THIRD_OCTET}.${LAST_OCTED}" # IP address for the bridge
+    BRIP="169.254.${THIRD_OCTET}.${LAST_OCTET}" # IP address for the bridge
     BRGW="169.254.${THIRD_OCTET}.1" # Gateway IP address for the bridge
 fi
 
@@ -407,7 +407,7 @@ ConnectionSetup() {
 
     ## Create default routes so we can route traffic - all traffic goes to the bridge gateway and this traffic gets Layer 2 sent to GWMAC
     arp -s -i $BRINT $BRGW $GWMAC
-    # In case filter ou mode is spceified, we only route traffic in the defined range
+    # In case filter-out mode is specified, we only route traffic in the defined range
     if [ -n "$RESTRICT_TO_DEST_RANGE" ]; then
         ip route add $RESTRICT_TO_DEST_RANGE via $BRGW dev $BRINT metric 10
     else
