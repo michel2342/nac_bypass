@@ -16,15 +16,17 @@ The NACkered script and our nac_bypass_setup.sh solution were written and tested
 The nac_bypass_setup.sh script has the following parameters:
 
 ```bash
-nac_bypass_setup.sh v0.6.4 usage:
+nac_bypass_setup.sh v0.7.0 usage:
     -1 <eth>    network interface plugged into switch
     -2 <eth>    network interface plugged into victim machine
     -a          autonomous mode
     -c          start connection setup only
     -g <MAC>    set gateway MAC address (GWMAC) manually
-    -t <MAC>    set target (printer or computer) MAC address (COMMAC) manually
-    -T <IP>     set target (printer or computer) IP address (COMIP) manually
+    -t <MAC>    set authenticated victim MAC address (COMMAC) manually
+    -T <IP>     set authenticated victim IP address (COMIP) manually
     -f <RANGE>  filter out all outbound connection except on this range (cautious mode, for Red Team)
+    -n <CIDR>   route this assessment network through the learned gateway
+    -p <PREFIX> victim subnet prefix for gateway discovery (example: -p 25)
     -s <IP>     set source IP address for communication with COMP. WARNING: IP address must exist, for supplicant ARP request to succeed
     -h          display this help
     -i          start initial setup only
@@ -35,9 +37,39 @@ nac_bypass_setup.sh v0.6.4 usage:
 
 The parameters `-1` and `-2` define which network adapters will be used. You can also edit them directly in the script: `-a` suppresses the output of the script’s log and debugging information and no manual interaction is required when running it. The parameters `-R` and `-S` activate port forwarding for the use of SSH and Responder. The parameters `-c`, `-i` and `-r` only initiate certain sequences within the script.
 
+### Reliable routed-network setup
+
+The script learns the victim IP and MAC only from traffic physically entering the victim-facing interface. The gateway MAC is learned separately from victim traffic addressed outside the victim subnet. Supply the victim prefix with `-p` when no fresh DHCP exchange is expected, and specify the assessment network with `-n`:
+
+```bash
+sudo ./nac_bypass_setup.sh -1 eth0 -2 eth1 -p 25 -n 10.215.112.0/20
+```
+
+Generate an outbound TCP connection from the victim if gateway discovery waits for traffic. Alternatively, bypass gateway discovery with a verified value:
+
+```bash
+sudo ./nac_bypass_setup.sh -1 eth0 -2 eth1 -p 25 \
+  -g 00:00:5e:00:01:01 -n 10.215.112.0/20
+```
+
+For Raspberry Pi systems running a Wi-Fi management AP, NetworkManager remains active and only the Ethernet bridge ports are marked unmanaged. If `dhcpcd` is installed, prevent it from assigning addresses to those ports by adding this to `/etc/dhcpcd.conf` and rebooting:
+
+```text
+denyinterfaces eth0 eth1
+```
+
+Verify the installed path with:
+
+```bash
+ip route get TARGET_IP
+tcpdump -eni eth0 'host TARGET_IP'
+```
+
+The route should use `br0`; packets leaving `eth0` should use the victim IP and MAC.
+
 ## Use
 
-The legitimate device, client, is not initially connected to the network switch. Now the script is started on the attacker device, bypass. Bypass and attacker are one physical device. The attacker figure symbolizes actions carried out by the attacker on the NAC bypass device. The first step is the initial configuration: To start with, unwanted services, such as NetworkManager, are stopped, IPv6 is disabled and any DNS configurations are initialized. Next, the bridge is configured and started. To ensure bridging works as desired, the kernel has to be configured to forward EAPOL frames. Without this adjustment, 802.1X authentication will not be carried out.
+The legitimate device, client, is not initially connected to the network switch. Now the script is started on the attacker device, bypass. Bypass and attacker are one physical device. The attacker figure symbolizes actions carried out by the attacker on the NAC bypass device. The first step is the initial configuration: NetworkManager is prevented from managing the Ethernet bridge members while remaining available for Wi-Fi management, IPv6 is disabled on the bridge members, and the bridge is configured and started. To ensure bridging works as desired, the kernel has to be configured to forward EAPOL frames. Without this adjustment, 802.1X authentication will not be carried out.
 
 Once the configuration is complete, the network cables can be connected and the bridge’s switch side is now enabled as a passive forwarder. The bypass device forwards all network traffic back and forth between the switch and the client but cannot send any packets itself. The client should now be authenticated with the network switch and can log into the network successfully.
 

