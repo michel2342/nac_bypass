@@ -27,6 +27,7 @@ nac_bypass_setup.sh v0.7.0 usage:
     -f <RANGE>  filter out all outbound connection except on this range (cautious mode, for Red Team)
     -n <CIDR>   route this assessment network through the learned gateway
     -p <PREFIX> victim subnet prefix for gateway discovery (example: -p 25)
+    -P <PORT>   forward victim IP TCP port to the same port on br0 (repeatable)
     -s <IP>     set source IP address for communication with COMP. WARNING: IP address must exist, for supplicant ARP request to succeed
     -h          display this help
     -i          start initial setup only
@@ -66,6 +67,14 @@ tcpdump -eni eth0 'host TARGET_IP'
 ```
 
 The route should use `br0`; packets leaving `eth0` should use the victim IP and MAC.
+
+To expose an existing TCP service running on the bridge host, add one or more `-P` options:
+
+```bash
+sudo ./nac_bypass_setup.sh -1 eth0 -2 eth1 -n 10.215.112.0/20 -P 8080 -P 8443
+```
+
+Each option redirects traffic addressed to the victim IP on that TCP port to the bridge IP on the same port. The service must already be listening on the bridge IP or all interfaces; `-P` does not start it. The existing `-R` and `-S` behavior is unchanged.
 
 ## Use
 

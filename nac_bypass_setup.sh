@@ -63,6 +63,7 @@ OPTION_AUTONOMOUS=0
 OPTION_CONNECTION_SETUP_ONLY=0
 OPTION_INITIAL_SETUP_ONLY=0
 OPTION_RESET=0
+TCP_FORWARD_PORTS=()
 
 ## Ports for tcpdump
 TCPDUMP_PORT_1=88
@@ -116,6 +117,7 @@ Usage() {
     echo "    -f <RANGE>  filter out all outbound connection except on this range (cautious mode, for Red Team)"
     echo "    -n <CIDR>   route this assessment network through the learned gateway"
     echo "    -p <PREFIX> victim subnet prefix for gateway discovery (example: -p 25)"
+    echo "    -P <PORT>   forward victim IP TCP port to the same port on br0 (repeatable)"
     echo "    -s <IP>     set source IP address for communication with COMP. WARNING: IP address must exist, for supplicant ARP request to succeed"
     echo "    -h          display this help"
     echo "    -i          start initial setup only"
@@ -156,7 +158,7 @@ IsValidIp() {
 
 ## Check if we got all needed parameters
 CheckParams() {
-    while getopts ":1:2:acg:f:n:p:s:t:T:hirRS" opts
+    while getopts ":1:2:acg:f:n:p:P:s:t:T:hirRS" opts
     do
         case "$opts" in
             "1")
@@ -189,6 +191,13 @@ CheckParams() {
             "p")
                 AUTO_ROUTE_PREFIX=$OPTARG
                 ;;
+            "P")
+                if ! [[ "$OPTARG" =~ ^[1-9][0-9]{0,4}$ ]] || (( 10#$OPTARG > 65535 )); then
+                    echo -e "$WARN [ ! ] Invalid TCP port for -P: $OPTARG (expected 1-65535)$TXTRST" >&2
+                    exit 1
+                fi
+                TCP_FORWARD_PORTS+=("$OPTARG")
+                ;;
             "s")
                 TO_COMP_SOURCE_IP=$OPTARG
                 ;;
@@ -217,6 +226,13 @@ CheckParams() {
 }
 
 InitialSetup() {
+
+    if [ "$SWINT" = "$COMPINT" ] ||
+       [ ! -e "/sys/class/net/$SWINT" ] ||
+       [ ! -e "/sys/class/net/$COMPINT" ]; then
+        echo -e "$WARN [ ! ] Use two different, existing interfaces for -1 and -2.$TXTRST"
+        exit 1
+    fi
 
     if [ "$OPTION_AUTONOMOUS" -eq 0 ]; then
         echo
@@ -304,6 +320,11 @@ InitialSetup() {
     ip -4 addr flush dev "$SWINT"
     ip link set dev "$COMPINT" up promisc on
     ip link set dev "$SWINT" up promisc on
+    sleep 1
+    if ip -4 -o addr show dev "$SWINT" | grep -q . || ip -4 -o addr show dev "$COMPINT" | grep -q .; then
+        echo -e "$WARN [ ! ] An Ethernet address reappeared after flush; another network service is managing an inline interface.$TXTRST"
+        exit 1
+    fi
 
     if [ "$RANDOMIZE" -eq 0 ]; then
         macchanger -m 00:12:34:56:78:90 $BRINT # Swap MAC of bridge to an initialisation value
@@ -499,7 +520,9 @@ PY
     ## Resolve and pin the verified gateway/victim identities to their known
     ## physical bridge sides. A neighbor entry alone does not select a port.
     ip neigh replace "$BRGW" lladdr "$GWMAC" nud permanent dev "$BRINT"
+    bridge link set dev "$COMPINT" learning off
     bridge fdb del "$GWMAC" dev "$COMPINT" master 2>/dev/null || true
+    bridge fdb del "$COMPMAC" dev "$SWINT" master 2>/dev/null || true
     bridge fdb replace "$GWMAC" dev "$SWINT" master static
     bridge fdb replace "$COMPMAC" dev "$COMPINT" master static
 
@@ -536,6 +559,13 @@ PY
         fi
         $CMD_IPTABLES -t nat -A PREROUTING -i br0 -d $COMIP -p tcp --dport $DPORT_SSH -j DNAT --to $BRIP:$PORT_SSH
     fi
+
+    ## Forward selected victim-IP TCP ports to services on the bridge IP.
+    for TCP_FORWARD_PORT in "${TCP_FORWARD_PORTS[@]}"; do
+        $CMD_IPTABLES -t nat -A PREROUTING -i "$BRINT" -d "$COMIP" -p tcp \
+            --dport "$TCP_FORWARD_PORT" -j DNAT --to-destination "$BRIP:$TCP_FORWARD_PORT"
+        echo -e "$SUCC [ + ] TCP $COMIP:$TCP_FORWARD_PORT -> $BRIP:$TCP_FORWARD_PORT$TXTRST"
+    done
 
     if [ "$OPTION_RESPONDER" -eq 1 ]; then
 
