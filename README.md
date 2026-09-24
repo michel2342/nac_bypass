@@ -7,16 +7,16 @@ The basic requirement for an NAC bypass is access to a device that has already b
 
 The NACkered script and our nac_bypass_setup.sh solution were written and tested on Debian-based Linux distributions, but both should be executable on other Linux distributions as well. The following software packages are required:
 
-1. Install tools, on Debian-like distros: `bridge-utils` `ethtool` `macchanger` `arptables` `ebtables` `iptables` `net-tools` `tcpdump`
+1. Install tools, on Debian-like distros: `bridge-utils` `ethtool` `macchanger` `arptables` `ebtables` `iproute2` `iptables` `net-tools` `netcat-openbsd` `tcpdump` `python3`
 2. Load kernel module: `modprobe br_netfilter`
-3. Persist kernel module: `br_netfilter`into `/etc/modules`
+3. Persist the kernel module by adding `br_netfilter` to `/etc/modules`
 
 ~~For arptables, iptables and ebtables, make sure not to use Netfilter xtable tools (nft), or the script will not work as desired.~~
 
 The nac_bypass_setup.sh script has the following parameters:
 
 ```bash
-nac_bypass_setup.sh v0.7.0 usage:
+nac_bypass_setup.sh v0.7.1 usage:
     -1 <eth>    network interface plugged into switch
     -2 <eth>    network interface plugged into victim machine
     -a          autonomous mode
@@ -27,7 +27,7 @@ nac_bypass_setup.sh v0.7.0 usage:
     -f <RANGE>  filter out all outbound connection except on this range (cautious mode, for Red Team)
     -n <CIDR>   route this assessment network through the learned gateway
     -p <PREFIX> victim subnet prefix for gateway discovery (example: -p 25)
-    -P <PORT>   forward victim IP TCP port to the same port on br0 (repeatable)
+    -P <PORT>   accept TCP from any source on victim IP and forward it to the same port on br0 (repeatable)
     -s <IP>     set source IP address for communication with COMP. WARNING: IP address must exist, for supplicant ARP request to succeed
     -h          display this help
     -i          start initial setup only
@@ -53,11 +53,15 @@ sudo ./nac_bypass_setup.sh -1 eth0 -2 eth1 -p 25 \
   -g 00:00:5e:00:01:01 -n 10.215.112.0/20
 ```
 
+`-p` describes the victim subnet for gateway discovery; it does not install the assessment route. `-n` installs that route through `br0`. Avoid `-n 0.0.0.0/0` unless intentionally moving the host's default IPv4 route away from WLAN.
+
 For Raspberry Pi systems running a Wi-Fi management AP, NetworkManager remains active and only the Ethernet bridge ports are marked unmanaged. If `dhcpcd` is installed, prevent it from assigning addresses to those ports by adding this to `/etc/dhcpcd.conf` and rebooting:
 
 ```text
 denyinterfaces eth0 eth1
 ```
+
+The script aborts when a running `dhcpcd` command line identifies either bridge interface.
 
 Verify the installed path with:
 
@@ -68,22 +72,27 @@ tcpdump -eni eth0 'host TARGET_IP'
 
 The route should use `br0`; packets leaving `eth0` should use the victim IP and MAC.
 
-To expose an existing TCP service running on the bridge host, add one or more `-P` options:
+### TCP port forwarding
+
+Use repeatable `-P PORT` options to expose existing TCP services on the bridge host through the victim IP:
 
 ```bash
-sudo ./nac_bypass_setup.sh -1 eth0 -2 eth1 -n 10.215.112.0/20 -P 8080 -P 8443
-```
-
-Each option redirects traffic addressed to the victim IP on that TCP port to the bridge IP on the same port. The service must already be listening on the bridge IP or all interfaces; `-P` does not start it. The existing `-R` and `-S` behavior is unchanged.
-
-For example, to expose a listener on TCP/8999:
-
-```bash
-nc -lvnp 8999
+sudo nc -nlvp 8999
 sudo ./nac_bypass_setup.sh -1 eth0 -2 eth1 -n 10.215.112.0/20 -P 8999
 ```
 
-The setup installs a source-specific return route for the bridge IP so replies to forwarded connections leave through `br0`, while the host's normal WLAN default route remains unchanged. Reset mode removes this policy-routing state.
+Connect to `VICTIM_IP:8999`, not the link-local bridge address. Each `-P` rule DNATs the victim port to the same port on `169.254.66.66`, permits the local TCP connection, and routes its replies through `br0`. WLAN management keeps its normal default route. The service must listen on `169.254.66.66` or all interfaces; `-P` does not start it.
+
+Verify the listener, NAT rule, and dedicated return route with:
+
+```bash
+sudo ss -lntp | grep ':8999'
+sudo iptables -t nat -vnL PREROUTING | grep 8999
+ip rule show | grep 16666
+ip route show table 16666
+```
+
+Reset mode (`-r`) removes the firewall and dedicated policy-routing state. Existing `-R` and `-S` behavior is unchanged.
 
 ## Use
 
