@@ -11,7 +11,7 @@ set -e
 # -----
 
 ## Variables
-VERSION="0.7.0"
+VERSION="0.7.1"
 RANDOMIZE=0
 
 CMD_ARPTABLES=/usr/sbin/arptables
@@ -64,6 +64,8 @@ OPTION_CONNECTION_SETUP_ONLY=0
 OPTION_INITIAL_SETUP_ONLY=0
 OPTION_RESET=0
 TCP_FORWARD_PORTS=()
+PORT_FORWARD_ROUTE_TABLE=16666
+PORT_FORWARD_RULE_PRIORITY=16666
 
 ## Ports for tcpdump
 TCPDUMP_PORT_1=88
@@ -104,6 +106,48 @@ CleanupCapture() {
 }
 trap CleanupCapture EXIT
 
+EnablePortForwardReturnPath() {
+    # DNAT delivers the connection locally as BRIP:PORT, so the initial route
+    # lookup for its reply uses BRIP as the source. Keep that reply on br0
+    # instead of allowing the host's WLAN/default route to capture it.
+    while ip rule del pref "$PORT_FORWARD_RULE_PRIORITY" \
+        from "$BRIP/32" table "$PORT_FORWARD_ROUTE_TABLE" 2>/dev/null; do :; done
+    ip route flush table "$PORT_FORWARD_ROUTE_TABLE" 2>/dev/null || true
+
+    # Preserve the optional direct path to the victim when -s is in use.
+    if [ -n "$TO_COMP_SOURCE_IP" ] && [ -n "$COMIP" ]; then
+        ip route replace table "$PORT_FORWARD_ROUTE_TABLE" \
+            "$COMIP/32" dev "$BRINT" scope link src "$BRIP"
+    fi
+
+    if ! ip route replace table "$PORT_FORWARD_ROUTE_TABLE" \
+        default via "$BRGW" dev "$BRINT" onlink src "$BRIP"; then
+        echo -e "$WARN [ ! ] Could not create the port-forward return route.$TXTRST" >&2
+        exit 1
+    fi
+
+    if ! ip rule add pref "$PORT_FORWARD_RULE_PRIORITY" \
+        from "$BRIP/32" table "$PORT_FORWARD_ROUTE_TABLE"; then
+        echo -e "$WARN [ ! ] Could not create the port-forward source-routing rule.$TXTRST" >&2
+        ip route flush table "$PORT_FORWARD_ROUTE_TABLE" 2>/dev/null || true
+        exit 1
+    fi
+
+    # This must precede cautious mode's catch-all OUTPUT drop.
+    $CMD_IPTABLES -C OUTPUT -o "$BRINT" -s "$BRIP" \
+        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+    $CMD_IPTABLES -I OUTPUT 1 -o "$BRINT" -s "$BRIP" \
+        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    echo -e "$SUCC [ + ] Return path enabled for forwarded TCP connections.$TXTRST"
+}
+
+DisablePortForwardReturnPath() {
+    while ip rule del pref "$PORT_FORWARD_RULE_PRIORITY" \
+        from "$BRIP/32" table "$PORT_FORWARD_ROUTE_TABLE" 2>/dev/null; do :; done
+    ip route flush table "$PORT_FORWARD_ROUTE_TABLE" 2>/dev/null || true
+}
+
 ## display usage hints
 Usage() {
     echo -e "$0 v$VERSION usage:"
@@ -117,7 +161,7 @@ Usage() {
     echo "    -f <RANGE>  filter out all outbound connection except on this range (cautious mode, for Red Team)"
     echo "    -n <CIDR>   route this assessment network through the learned gateway"
     echo "    -p <PREFIX> victim subnet prefix for gateway discovery (example: -p 25)"
-    echo "    -P <PORT>   forward victim IP TCP port to the same port on br0 (repeatable)"
+    echo "    -P <PORT>   accept TCP from any source on victim IP and forward it to the same port on br0 (repeatable)"
     echo "    -s <IP>     set source IP address for communication with COMP. WARNING: IP address must exist, for supplicant ARP request to succeed"
     echo "    -h          display this help"
     echo "    -i          start initial setup only"
@@ -549,6 +593,10 @@ PY
         echo -e "$SUCC [ + ] Route installed: $TARGET_ROUTE_RANGE via $BRGW dev $BRINT$TXTRST"
     fi
 
+    if ((${#TCP_FORWARD_PORTS[@]} > 0)); then
+        EnablePortForwardReturnPath
+    fi
+
     ## SSH CALLBACK if we receive inbound on br0 for VICTIMIP:DPORT forward to BRIP on SSH
     if [ "$OPTION_SSH" -eq 1 ]; then
 
@@ -562,9 +610,21 @@ PY
 
     ## Forward selected victim-IP TCP ports to services on the bridge IP.
     for TCP_FORWARD_PORT in "${TCP_FORWARD_PORTS[@]}"; do
+        $CMD_IPTABLES -t nat -C PREROUTING -i "$BRINT" -d "$COMIP" -p tcp \
+            --dport "$TCP_FORWARD_PORT" -j DNAT \
+            --to-destination "$BRIP:$TCP_FORWARD_PORT" 2>/dev/null || \
         $CMD_IPTABLES -t nat -A PREROUTING -i "$BRINT" -d "$COMIP" -p tcp \
-            --dport "$TCP_FORWARD_PORT" -j DNAT --to-destination "$BRIP:$TCP_FORWARD_PORT"
-        echo -e "$SUCC [ + ] TCP $COMIP:$TCP_FORWARD_PORT -> $BRIP:$TCP_FORWARD_PORT$TXTRST"
+            --dport "$TCP_FORWARD_PORT" -j DNAT \
+            --to-destination "$BRIP:$TCP_FORWARD_PORT"
+
+        $CMD_IPTABLES -C INPUT -i "$BRINT" -d "$BRIP" -p tcp \
+            --dport "$TCP_FORWARD_PORT" -m conntrack \
+            --ctstate NEW,ESTABLISHED -j ACCEPT 2>/dev/null || \
+        $CMD_IPTABLES -I INPUT 1 -i "$BRINT" -d "$BRIP" -p tcp \
+            --dport "$TCP_FORWARD_PORT" -m conntrack \
+            --ctstate NEW,ESTABLISHED -j ACCEPT
+
+        echo -e "$SUCC [ + ] TCP any source -> $COMIP:$TCP_FORWARD_PORT -> $BRIP:$TCP_FORWARD_PORT$TXTRST"
     done
 
     if [ "$OPTION_RESPONDER" -eq 1 ]; then
@@ -653,13 +713,19 @@ Reset() {
         echo
     fi
 
+    ## Remove policy, route and neighbor state while the bridge still exists.
+    DisablePortForwardReturnPath
+    if [ -n "$RESTRICT_TO_DEST_RANGE" ]; then
+        ip route del "$RESTRICT_TO_DEST_RANGE" via "$BRGW" dev "$BRINT" 2>/dev/null || true
+    fi
+    if [ -n "$TARGET_ROUTE_RANGE" ]; then
+        ip route del "$TARGET_ROUTE_RANGE" via "$BRGW" dev "$BRINT" 2>/dev/null || true
+    fi
+    ip neigh del "$BRGW" dev "$BRINT" 2>/dev/null || true
+
     ## Bringing bridge down
     ifconfig $BRINT down 2>/dev/null || true
     brctl delbr $BRINT 2>/dev/null || true
-
-    ## Delete default route
-    arp -d -i $BRINT $BRGW $GWMAC 2>/dev/null || true
-    route del default dev $BRINT 2>/dev/null || true
 
     # Flush EB, ARP- and IPTABLES
     $CMD_EBTABLES -F

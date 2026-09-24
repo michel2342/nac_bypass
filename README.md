@@ -76,6 +76,15 @@ sudo ./nac_bypass_setup.sh -1 eth0 -2 eth1 -n 10.215.112.0/20 -P 8080 -P 8443
 
 Each option redirects traffic addressed to the victim IP on that TCP port to the bridge IP on the same port. The service must already be listening on the bridge IP or all interfaces; `-P` does not start it. The existing `-R` and `-S` behavior is unchanged.
 
+For example, to expose a listener on TCP/8999:
+
+```bash
+nc -lvnp 8999
+sudo ./nac_bypass_setup.sh -1 eth0 -2 eth1 -n 10.215.112.0/20 -P 8999
+```
+
+The setup installs a source-specific return route for the bridge IP so replies to forwarded connections leave through `br0`, while the host's normal WLAN default route remains unchanged. Reset mode removes this policy-routing state.
+
 ## Use
 
 The legitimate device, client, is not initially connected to the network switch. Now the script is started on the attacker device, bypass. Bypass and attacker are one physical device. The attacker figure symbolizes actions carried out by the attacker on the NAC bypass device. The first step is the initial configuration: NetworkManager is prevented from managing the Ethernet bridge members while remaining available for Wi-Fi management, IPv6 is disabled on the bridge members, and the bridge is configured and started. To ensure bridging works as desired, the kernel has to be configured to forward EAPOL frames. Without this adjustment, 802.1X authentication will not be carried out.
