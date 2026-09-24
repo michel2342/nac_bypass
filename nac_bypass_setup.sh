@@ -294,7 +294,8 @@ InitialSetup() {
     # ensuring it does not configure the transparent Ethernet bridge members.
     nmcli device set "$SWINT" managed no 2>/dev/null || true
     nmcli device set "$COMPINT" managed no 2>/dev/null || true
-    if pgrep -af dhcpcd 2>/dev/null | grep -Eq "dhcpcd:.*(${SWINT}|${COMPINT})"; then
+    if pgrep -a -x dhcpcd 2>/dev/null |
+       grep -Eq "(^|[[:space:]])(${SWINT}|${COMPINT})([[:space:]]|$)"; then
         echo -e "$WARN [ ! ] dhcpcd still manages a bridge port. Add 'denyinterfaces $SWINT $COMPINT' to /etc/dhcpcd.conf and reboot.$TXTRST"
         exit 1
     fi
